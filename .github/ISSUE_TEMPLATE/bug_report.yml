@@ -1,0 +1,27 @@
+name: Bug report
+about: Report a reproducible problem without exposing private data
+title: "Bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include access tokens, cookies, private messages, unpublished game links, or other secrets.
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: Use a public completed game ID or a redacted fixture.
+    validations:
+      required: true

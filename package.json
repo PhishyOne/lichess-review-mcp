@@ -1,0 +1,27 @@
+{
+  "name": "lichess-review-mcp",
+  "version": "0.1.0",
+  "description": "Read-only MCP server for reviewing completed Lichess games in ChatGPT.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "node scripts/check.js",
+    "test": "node --test",
+    "build": "node scripts/build.js",
+    "start": "node dist/index.js",
+    "dev": "node src/index.js",
+    "smoke": "node scripts/smoke.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PhishyOne/lichess-review-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/PhishyOne/lichess-review-mcp/issues"
+  },
+  "homepage": "https://github.com/PhishyOne/lichess-review-mcp#readme"
+}
