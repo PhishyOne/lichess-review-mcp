@@ -75,6 +75,7 @@ export async function close(server) {
   return new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
 }
 
+
 function hasSupportedProtocolHeader(value, body) {
   if (body && typeof body === 'object' && !Array.isArray(body) && body.method === 'initialize') return true;
   const version = value === undefined ? '2025-03-26' : String(value).trim();
