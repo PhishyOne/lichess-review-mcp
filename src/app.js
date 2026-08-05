@@ -8,6 +8,11 @@ export function createApp(options = {}) {
   return createHttpServer({
     dispatch,
     allowedHosts: options.allowedHosts,
-    allowedOrigins: options.allowedOrigins
+    allowedOrigins: options.allowedOrigins,
+    maxRequestsPerWindow: options.maxRequestsPerWindow,
+    rateLimitWindowMs: options.rateLimitWindowMs,
+    maxInFlightRequests: options.maxInFlightRequests,
+    logger: options.logger,
+    now: options.now
   });
 }
