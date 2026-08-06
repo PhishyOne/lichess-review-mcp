@@ -12,10 +12,12 @@ Read-only MCP server for reviewing completed public Lichess games in ChatGPT. It
 - Read-only; no OAuth, database, move playing, messaging, challenges, or account management.
 - No server-side Stockfish or bulk history imports.
 - Fixed Lichess origin, one upstream request at a time, bounded queue, 8-second timeout, manual redirect refusal, 512 KiB response limit, no automatic retries, and at least 60 seconds of cooldown after HTTP 429.
+- Upstream work waiting longer than 2 seconds to begin is refused instead of remaining in a long queue.
 - Small in-memory TTL/LRU caches only.
 - Completed-game status allowlist. `created`, `started`, missing, and unknown statuses fail closed.
 - Localhost-only Host/Origin defaults. A deployment must explicitly set `ALLOWED_HOSTS` and `ALLOWED_ORIGINS`.
-- HTTP backstops default to 120 MCP requests per minute globally and 8 in-flight MCP requests. Excess work is rejected before parsing or dispatch.
+- HTTP backstops separately limit all MCP transport requests and expensive `tools/call` requests. Defaults are 600 transport requests per minute, 120 tool calls per minute, and 8 in-flight tool calls.
+- Cheap MCP setup traffic does not consume tool-call rate or concurrency capacity.
 - Optional structured request logs contain only a generated request ID, method, route class, response status, and duration. Tool arguments, usernames, game IDs, IP addresses, hosts, origins, and raw paths are not logged.
 
 ## Local use
@@ -47,14 +49,15 @@ HOST=0.0.0.0 PORT=3000 npm start
 HTTP hardening can be tuned with positive integers:
 
 ```sh
-HTTP_RATE_LIMIT_REQUESTS=120 \
+HTTP_RATE_LIMIT_REQUESTS=600 \
+HTTP_TOOL_RATE_LIMIT_REQUESTS=120 \
 HTTP_RATE_LIMIT_WINDOW_MS=60000 \
-HTTP_MAX_IN_FLIGHT_REQUESTS=8 \
+HTTP_MAX_IN_FLIGHT_TOOL_CALLS=8 \
 LOG_REQUESTS=1 \
 npm start
 ```
 
-The built-in request limiter is a process-wide emergency backstop, not a substitute for per-client limits at a trusted reverse proxy or edge. The `/health` endpoint remains minimal and is excluded from request logs and MCP request limits.
+The built-in limiters are process-wide emergency backstops, not substitutes for per-client limits at a trusted reverse proxy or edge. The `/health` endpoint remains minimal and is excluded from request logs and MCP request limits.
 
 Do not deploy publicly until the integration tests, deployment limits, publisher requirements, and support ownership are separately approved.
 
