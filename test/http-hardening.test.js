@@ -13,8 +13,9 @@ async function withServer(callback, options = {}) {
     allowedHosts: ['127.0.0.1'],
     allowedOrigins: options.allowedOrigins ?? [],
     maxRequestsPerWindow: options.maxRequestsPerWindow,
+    maxToolCallsPerWindow: options.maxToolCallsPerWindow,
     rateLimitWindowMs: options.rateLimitWindowMs,
-    maxInFlightRequests: options.maxInFlightRequests,
+    maxInFlightToolCalls: options.maxInFlightToolCalls,
     logger: options.logger,
     now: options.now
   });
@@ -35,8 +36,14 @@ function post(base, body, headers = {}) {
 }
 
 const ping = { jsonrpc: '2.0', id: 1, method: 'ping' };
+const toolCall = (id) => ({
+  jsonrpc: '2.0',
+  id,
+  method: 'tools/call',
+  params: { name: 'get_completed_game', arguments: { game: 'Ab12Cd34' } }
+});
 
-test('global MCP request limiter returns 429 with Retry-After and resets after its window', async () => {
+test('transport limiter returns 429 with Retry-After and resets after its window', async () => {
   let currentTime = 1_000;
   await withServer(async (base) => {
     assert.equal((await post(base, ping)).status, 200);
@@ -58,7 +65,25 @@ test('global MCP request limiter returns 429 with Retry-After and resets after i
   });
 });
 
-test('concurrency guard rejects excess in-flight MCP requests without growing work', async () => {
+test('tool call limiter is separate from cheap MCP control traffic', async () => {
+  await withServer(async (base) => {
+    for (let id = 1; id <= 5; id += 1) {
+      assert.equal((await post(base, { ...ping, id })).status, 200);
+    }
+
+    assert.equal((await post(base, toolCall(10))).status, 200);
+    const refused = await post(base, toolCall(11));
+    assert.equal(refused.status, 429);
+    assert.deepEqual(await refused.json(), { error: 'Tool call rate limit exceeded. Try again later.' });
+
+    assert.equal((await post(base, { ...ping, id: 12 })).status, 200);
+  }, {
+    maxRequestsPerWindow: 20,
+    maxToolCallsPerWindow: 1
+  });
+});
+
+test('tool concurrency guard rejects only excess tool calls', async () => {
   let releaseHandler;
   const blocked = new Promise((resolve) => { releaseHandler = resolve; });
   let markStarted;
@@ -72,20 +97,19 @@ test('concurrency guard rejects excess in-flight MCP requests without growing wo
   };
 
   await withServer(async (base) => {
-    const first = post(base, {
-      jsonrpc: '2.0', id: 10, method: 'tools/call',
-      params: { name: 'get_completed_game', arguments: { game: 'Ab12Cd34' } }
-    });
+    const first = post(base, toolCall(20));
     await started;
 
-    const refused = await post(base, { ...ping, id: 11 });
+    assert.equal((await post(base, { ...ping, id: 21 })).status, 200);
+
+    const refused = await post(base, toolCall(22));
     assert.equal(refused.status, 503);
     assert.equal(refused.headers.get('retry-after'), '1');
-    assert.deepEqual(await refused.json(), { error: 'Server is busy. Try again shortly.' });
+    assert.deepEqual(await refused.json(), { error: 'Tool call capacity is busy. Try again shortly.' });
 
     releaseHandler();
     assert.equal((await first).status, 200);
-  }, { dispatch, maxInFlightRequests: 1 });
+  }, { dispatch, maxInFlightToolCalls: 1 });
 });
 
 test('request logs contain operational metadata but no tool arguments, hosts, origins, or raw paths', async () => {
