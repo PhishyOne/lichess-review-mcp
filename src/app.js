@@ -10,8 +10,9 @@ export function createApp(options = {}) {
     allowedHosts: options.allowedHosts,
     allowedOrigins: options.allowedOrigins,
     maxRequestsPerWindow: options.maxRequestsPerWindow,
+    maxToolCallsPerWindow: options.maxToolCallsPerWindow,
     rateLimitWindowMs: options.rateLimitWindowMs,
-    maxInFlightRequests: options.maxInFlightRequests,
+    maxInFlightToolCalls: options.maxInFlightToolCalls,
     logger: options.logger,
     now: options.now
   });

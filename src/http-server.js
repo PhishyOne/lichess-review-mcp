@@ -5,11 +5,12 @@ import {
   HEALTH_ENDPOINT,
   HTTP_HEADERS_TIMEOUT_MS,
   HTTP_KEEP_ALIVE_TIMEOUT_MS,
-  HTTP_MAX_IN_FLIGHT_REQUESTS,
+  HTTP_MAX_IN_FLIGHT_TOOL_CALLS,
   HTTP_MAX_REQUESTS_PER_SOCKET,
   HTTP_RATE_LIMIT_REQUESTS,
   HTTP_RATE_LIMIT_WINDOW_MS,
   HTTP_REQUEST_TIMEOUT_MS,
+  HTTP_TOOL_RATE_LIMIT_REQUESTS,
   MAX_REQUEST_BODY_BYTES,
   MCP_ENDPOINT,
   SUPPORTED_PROTOCOL_VERSIONS
@@ -20,7 +21,9 @@ export function createHttpServer({
   allowedHosts,
   allowedOrigins,
   maxRequestsPerWindow,
+  maxToolCallsPerWindow,
   rateLimitWindowMs,
+  maxInFlightToolCalls,
   maxInFlightRequests,
   logger,
   now = () => Date.now()
@@ -31,25 +34,35 @@ export function createHttpServer({
   const hostPolicy = compileHostPolicy(allowedHosts ?? process.env.ALLOWED_HOSTS);
   const originPolicy = compileOriginPolicy(allowedOrigins ?? process.env.ALLOWED_ORIGINS);
   const requestLogger = compileRequestLogger(logger, process.env.LOG_REQUESTS);
-  const limiter = createFixedWindowLimiter({
+  const windowMs = parsePositiveInteger(
+    rateLimitWindowMs ?? process.env.HTTP_RATE_LIMIT_WINDOW_MS,
+    HTTP_RATE_LIMIT_WINDOW_MS,
+    'HTTP_RATE_LIMIT_WINDOW_MS'
+  );
+  const transportLimiter = createFixedWindowLimiter({
     limit: parsePositiveInteger(
       maxRequestsPerWindow ?? process.env.HTTP_RATE_LIMIT_REQUESTS,
       HTTP_RATE_LIMIT_REQUESTS,
       'HTTP_RATE_LIMIT_REQUESTS'
     ),
-    windowMs: parsePositiveInteger(
-      rateLimitWindowMs ?? process.env.HTTP_RATE_LIMIT_WINDOW_MS,
-      HTTP_RATE_LIMIT_WINDOW_MS,
-      'HTTP_RATE_LIMIT_WINDOW_MS'
+    windowMs,
+    now
+  });
+  const toolCallLimiter = createFixedWindowLimiter({
+    limit: parsePositiveInteger(
+      maxToolCallsPerWindow ?? process.env.HTTP_TOOL_RATE_LIMIT_REQUESTS,
+      HTTP_TOOL_RATE_LIMIT_REQUESTS,
+      'HTTP_TOOL_RATE_LIMIT_REQUESTS'
     ),
+    windowMs,
     now
   });
   const maxInFlight = parsePositiveInteger(
-    maxInFlightRequests ?? process.env.HTTP_MAX_IN_FLIGHT_REQUESTS,
-    HTTP_MAX_IN_FLIGHT_REQUESTS,
-    'HTTP_MAX_IN_FLIGHT_REQUESTS'
+    maxInFlightToolCalls ?? maxInFlightRequests ?? process.env.HTTP_MAX_IN_FLIGHT_TOOL_CALLS ?? process.env.HTTP_MAX_IN_FLIGHT_REQUESTS,
+    HTTP_MAX_IN_FLIGHT_TOOL_CALLS,
+    'HTTP_MAX_IN_FLIGHT_TOOL_CALLS'
   );
-  let inFlight = 0;
+  let toolCallsInFlight = 0;
 
   const server = createServer((req, res) => {
     void handleRequest(req, res);
@@ -106,52 +119,55 @@ export function createHttpServer({
         return sendJson(res, 405, { error: 'Method not allowed.' });
       }
 
-      const rate = limiter.take();
-      if (!rate.allowed) {
-        res.setHeader('Retry-After', String(Math.max(1, Math.ceil(rate.retryAfterMs / 1000))));
+      const transportRate = transportLimiter.take();
+      if (!transportRate.allowed) {
+        res.setHeader('Retry-After', retryAfterSeconds(transportRate.retryAfterMs));
         return sendJson(res, 429, { error: 'Request rate limit exceeded. Try again later.' });
       }
 
-      if (inFlight >= maxInFlight) {
-        res.setHeader('Retry-After', '1');
-        return sendJson(res, 503, { error: 'Server is busy. Try again shortly.' });
+      if (!isJsonContentType(req.headers['content-type'])) {
+        return sendJson(res, 415, { error: 'Content-Type must be application/json.' });
       }
 
-      inFlight += 1;
+      const accept = req.headers.accept ?? '*/*';
+      if (!accept.includes('*/*') && !accept.includes('application/json')) {
+        return sendJson(res, 406, { error: 'This server returns application/json.' });
+      }
+
+      let body;
       try {
-        if (!isJsonContentType(req.headers['content-type'])) {
-          return sendJson(res, 415, { error: 'Content-Type must be application/json.' });
-        }
+        body = await readJsonBody(req, MAX_REQUEST_BODY_BYTES);
+      } catch (error) {
+        return sendJson(res, error.statusCode ?? 400, { error: error.message });
+      }
 
-        const accept = req.headers.accept ?? '*/*';
-        if (!accept.includes('*/*') && !accept.includes('application/json')) {
-          return sendJson(res, 406, { error: 'This server returns application/json.' });
-        }
+      if (Array.isArray(body)) {
+        return sendJson(res, 400, { error: 'Streamable HTTP accepts one JSON-RPC message per POST.' });
+      }
 
-        let body;
-        try {
-          body = await readJsonBody(req, MAX_REQUEST_BODY_BYTES);
-        } catch (error) {
-          return sendJson(res, error.statusCode ?? 400, { error: error.message });
-        }
+      if (!hasSupportedProtocolHeader(req.headers['mcp-protocol-version'], body)) {
+        return sendJson(res, 400, { error: 'Unsupported MCP-Protocol-Version header.' });
+      }
 
-        if (Array.isArray(body)) {
-          return sendJson(res, 400, { error: 'Streamable HTTP accepts one JSON-RPC message per POST.' });
-        }
+      const isToolCall = body && typeof body === 'object' && body.method === 'tools/call';
+      if (!isToolCall) return await dispatchResponse(body, res);
 
-        if (!hasSupportedProtocolHeader(req.headers['mcp-protocol-version'], body)) {
-          return sendJson(res, 400, { error: 'Unsupported MCP-Protocol-Version header.' });
-        }
+      const toolRate = toolCallLimiter.take();
+      if (!toolRate.allowed) {
+        res.setHeader('Retry-After', retryAfterSeconds(toolRate.retryAfterMs));
+        return sendJson(res, 429, { error: 'Tool call rate limit exceeded. Try again later.' });
+      }
 
-        const response = await dispatch(body);
-        if (!response) {
-          res.statusCode = 202;
-          return res.end();
-        }
+      if (toolCallsInFlight >= maxInFlight) {
+        res.setHeader('Retry-After', '1');
+        return sendJson(res, 503, { error: 'Tool call capacity is busy. Try again shortly.' });
+      }
 
-        return sendJson(res, 200, response);
+      toolCallsInFlight += 1;
+      try {
+        return await dispatchResponse(body, res);
       } finally {
-        inFlight -= 1;
+        toolCallsInFlight -= 1;
       }
     } catch {
       if (res.headersSent) {
@@ -160,6 +176,16 @@ export function createHttpServer({
       }
       return sendJson(res, 500, { error: 'Internal server error.' });
     }
+  }
+
+  async function dispatchResponse(body, res) {
+    const response = await dispatch(body);
+    if (!response) {
+      res.statusCode = 202;
+      res.end();
+      return;
+    }
+    return sendJson(res, 200, response);
   }
 }
 
@@ -307,4 +333,8 @@ function classifyRoute(pathname) {
   if (pathname === HEALTH_ENDPOINT) return 'health';
   if (pathname === MCP_ENDPOINT) return 'mcp';
   return 'other';
+}
+
+function retryAfterSeconds(milliseconds) {
+  return String(Math.max(1, Math.ceil(milliseconds / 1000)));
 }
