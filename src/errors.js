@@ -45,3 +45,13 @@ export class QueueFullError extends AppError {
     super('QUEUE_FULL', 'The bounded Lichess request queue is full. Try again later.', { status: 503 });
   }
 }
+
+export class QueueWaitTimeoutError extends AppError {
+  constructor(maxWaitMs) {
+    super(
+      'QUEUE_WAIT_TIMEOUT',
+      `The Lichess request could not start within ${maxWaitMs} ms. Try again later.`,
+      { status: 503 }
+    );
+  }
+}
